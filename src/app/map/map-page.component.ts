@@ -1,100 +1,60 @@
-import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject, signal, PLATFORM_ID, Inject, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
+import { Component, ElementRef, OnDestroy, OnInit, ViewChild, PLATFORM_ID, Inject, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
 import { CommonModule, isPlatformBrowser } from '@angular/common';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Subject, Observable } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
 import { LocalizationService } from '../localization/localization.service';
+import { MAP_CONFIG, type MapConfig } from '../map-config';
+import { ArcGISInitService } from '../services/arcgis-init.service';
+type MapView = __esri.MapView;
+type Layer = __esri.Layer;
+type Position = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'top-leading' | 'top-trailing' | 'bottom-leading' | 'bottom-trailing';
+import { SketchService } from '../services/sketch.service';
+import { LayerService } from '../services/layer.service';
+import { UIService } from '../services/ui.service';
+import { MapStateService } from '../services/map-state.service';
+import { SettingsService, type MapSettings, type UISettings } from '../services/settings.service';
 
 @Component({
   schemas: [CUSTOM_ELEMENTS_SCHEMA],
   selector: 'app-map-page',
   standalone: true,
   imports: [CommonModule],
-  // ...existing code...
-  template: `
-    <div #mapViewDiv class="map-container"></div>
-    <div class="sketch-toolbar" [dir]="localizationService.localeDir$ | async">
-      <calcite-button
-        appearance="transparent"
-        kind="neutral"
-        icon-start="trash"
-        (click)="clear()"
-      >
-        {{ localizationService.getLocalizedLabel('נקה', 'Clear') }}
-      </calcite-button>
-      <calcite-button
-        appearance="transparent"
-        kind="neutral"
-        icon-start="arrow-left"
-        [disabled]="!canUndo()"
-        (click)="undo()"
-      >
-        {{ localizationService.getLocalizedLabel('בטל', 'Undo') }}
-      </calcite-button>
-      <calcite-button
-        appearance="transparent"
-        kind="neutral"
-        icon-start="arrow-right"
-        [disabled]="!canRedo()"
-        (click)="redo()"
-      >
-        {{ localizationService.getLocalizedLabel('בצע שוב', 'Redo') }}
-      </calcite-button>
-    </div>
-  `,
-  styles: [`
-    :host {
-      display: block;
-      width: 100%;
-      height: 100%;
-      position: relative;
-    }
-    .map-container {
-      width: 100%;
-      height: 100%;
-    }
-    .sketch-toolbar {
-      position: absolute;
-    /* place below the fixed top-bar (app uses 3.5rem margin for content)
-      shift right and a bit lower so it doesn't cover nearby UI buttons */
-    top: 16px;
-    left: 80px;
-  /* keep it below main chrome and calcite overlays (top-bar z-index: 1000) */
-  z-index: 900;
-      background: var(--calcite-ui-foreground-1);
-      padding: 0.5rem;
-      border-radius: 0.25rem;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-      gap: 0.5rem;
-    }
-    calcite-button {
-      --calcite-ui-text-1: var(--calcite-ui-text-1);
-      --calcite-ui-text-3: var(--calcite-ui-text-3);
-      min-width: 32px;
-    }
-  `]
+  templateUrl: 'map-page.component.html',
+  styleUrls: ['map-page.component.scss']
 })
 export class MapPageComponent implements OnInit, OnDestroy {
   @ViewChild('mapViewDiv', { static: true }) private mapViewDiv!: ElementRef<HTMLDivElement>;
-  private view: __esri.MapView | null = null;
-  private graphicsLayer: __esri.GraphicsLayer | null = null;
-  private sketch: __esri.Sketch | null = null;
-  private sketchExpand: __esri.Expand | null = null;
-  private operations = 0;
+  private view: MapView | null = null;
   private readonly isBrowser: boolean;
-  // ...existing code...
+  private readonly destroy$ = new Subject<void>();
 
-  protected readonly localizationService = inject(LocalizationService);
-  protected readonly canUndo = signal(false);
-  protected readonly canRedo = signal(false);
+  // Expose sketch service state for template
+  protected readonly canUndo$: Observable<boolean>;
+  protected readonly canRedo$: Observable<boolean>;
+  protected readonly hasFeatures$: Observable<boolean>;
 
-  constructor(@Inject(PLATFORM_ID) platformId: Object) {
+  constructor(
+    @Inject(PLATFORM_ID) platformId: Object,
+    @Inject(MAP_CONFIG) private readonly config: MapConfig,
+    protected readonly localizationService: LocalizationService,
+    private readonly arcgisService: ArcGISInitService,
+    protected readonly sketchService: SketchService,
+    private readonly layerService: LayerService,
+    private readonly uiService: UIService,
+    private readonly mapStateService: MapStateService,
+    private readonly settingsService: SettingsService
+  ) {
     this.isBrowser = isPlatformBrowser(platformId);
+    this.canUndo$ = this.sketchService.canUndo$;
+    this.canRedo$ = this.sketchService.canRedo$;
+    this.hasFeatures$ = this.sketchService.hasFeatures$;
     
     if (this.isBrowser) {
       this.localizationService.current$
-        .pipe(takeUntilDestroyed())
+        .pipe(takeUntil(this.destroy$))
         .subscribe(() => {
-          if (this.view && this.sketch) {
-            this.recreateSketchWidget().catch(console.error);
+          if (this.view) {
+            this.sketchService.initialize(this.view).catch(console.error);
           }
         });
     }
@@ -106,234 +66,327 @@ export class MapPageComponent implements OnInit, OnDestroy {
     }
 
     try {
-      const [
-        { default: Map },
-        { default: MapView },
-        { default: BasemapToggle },
-        { default: Search },
-        { default: Expand },
-        { default: LayerList },
-        { default: FeatureLayer },
-        { default: GraphicsLayer },
-        { default: Sketch }
-      ] = await Promise.all([
-        import('@arcgis/core/Map'),
-        import('@arcgis/core/views/MapView'),
-        import('@arcgis/core/widgets/BasemapToggle'),
-        import('@arcgis/core/widgets/Search'),
-        import('@arcgis/core/widgets/Expand'),
-        import('@arcgis/core/widgets/LayerList'),
-        import('@arcgis/core/layers/FeatureLayer'),
-        import('@arcgis/core/layers/GraphicsLayer'),
-        import('@arcgis/core/widgets/Sketch')
-      ]);
-
-      // Create a sample feature layer (World Cities)
-      const citiesLayer = new FeatureLayer({
-        url: 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/World_Cities/FeatureServer/0',
-        popupTemplate: {
-          title: '{CITY_NAME}',
-          content: [
-            {
-              type: 'fields',
-              fieldInfos: [
-                { fieldName: 'COUNTRY', label: 'Country' },
-                { fieldName: 'POP', label: 'Population' },
-                { fieldName: 'STATUS', label: 'Status' }
-              ]
-            }
-          ]
-        }
-      });
-
-      // Create graphics layer for sketches
-      this.graphicsLayer = new GraphicsLayer({
-        title: 'Sketch Layer'
-      });
-
-      // Create map and view
-      const map = new Map({
-        basemap: 'topo-vector', // Using a supported basemap
-        layers: [citiesLayer, this.graphicsLayer]
-      });
-
-      this.view = new MapView({
+      // Initialize the map and view using the service
+      const view = await this.arcgisService.initializeMapView({
         container: this.mapViewDiv.nativeElement,
-        map: map,
-        center: [35.2137, 31.7683], // Jerusalem coordinates
-        zoom: 10
+        layers: []  // We'll add layers through the LayerService
       });
 
-      await this.createSketchWidget();
+      // Store view reference for use in other methods
+      this.view = view;
 
-      // Add search component
-      const searchElement = document.createElement('arcgis-search') as ArcGISSearchElement;
-      searchElement.view = this.view;
-      this.view.ui.add(searchElement, 'top-right');
+      try {
+        // Wait for view to be ready
+        await view.when();
 
-      // Add basemap toggle component
-      const basemapToggleElement = document.createElement('arcgis-basemap-toggle') as ArcGISBasemapToggleElement;
-      basemapToggleElement.view = this.view;
-      basemapToggleElement.nextBasemap = 'satellite';
-      this.view.ui.add(basemapToggleElement, 'bottom-right');
+        // Initialize services in dependency order
+        if (this.config.layers) {
+          await this.layerService.initializeLayers(view, this.config.layers);
+        }
+        
+        // Initialize sketch service first as UI depends on it
+        await this.sketchService.initialize(view);
+        
+        // Initialize UI service after sketch service
+        await this.uiService.initialize(view);
+        
+        // Initialize map state service last as it depends on view state
+        await this.mapStateService.initialize(view);
 
-      // Add layer list in an expand widget
-      const layerList = new LayerList({ view: this.view });
-      const expand = new Expand({
-        view: this.view,
-        content: layerList,
-        expandIcon: 'layers'
-      });
-      this.view.ui.add(expand, 'top-left');
+        // Apply initial settings
+        const currentSettings = this.settingsService.getCurrentSettings();
+        await this.applyMapSettings(currentSettings.map);
+        await this.applyUISettings(currentSettings.ui);
+        
+        // Subscribe to settings changes with error handling
+        this.settingsService.mapSettings$
+          .pipe(takeUntil(this.destroy$))
+          .subscribe({
+            next: settings => this.applyMapSettings(settings),
+            error: error => console.error('Error in map settings subscription:', error)
+          });
 
+        this.settingsService.uiSettings$
+          .pipe(takeUntil(this.destroy$))
+          .subscribe({
+            next: settings => this.applyUISettings(settings),
+            error: error => console.error('Error in UI settings subscription:', error)
+          });
+
+      } catch (error) {
+        console.error('Error initializing services:', error);
+        // Clean up view if service initialization fails
+        await this.arcgisService.detach();
+        this.view = null;
+        throw error;  // Re-throw to be caught by outer try-catch
+      }
     } catch (error) {
-      console.error('Error initializing map:', error);
+      console.error('Error initializing map component:', error);
+      // Ensure map div is cleaned up if initialization fails
+      if (this.mapViewDiv?.nativeElement) {
+        this.mapViewDiv.nativeElement.innerHTML = '';
+      }
     }
   }
 
   // Sketch toolbar methods
   protected clear(): void {
-    if (!this.graphicsLayer || !this.sketch) return;
-    this.graphicsLayer.removeAll();
-    this.canUndo.set(false);
-    this.canRedo.set(false);
+    this.sketchService.clear();
   }
 
   protected undo(): void {
-    if (!this.sketch) return;
-    this.sketch.undo();
+    this.sketchService.undo();
   }
 
   protected redo(): void {
-    if (!this.sketch) return;
-    this.sketch.redo();
+    this.sketchService.redo();
   }
 
-  private async createSketchWidget(): Promise<void> {
+  /**
+   * Apply map display settings
+   */
+  private async applyMapSettings(settings: MapSettings): Promise<void> {
     if (!this.view) return;
 
-    const [{ default: Sketch }, { default: Expand }] = await Promise.all([
-      import('@arcgis/core/widgets/Sketch'),
-      import('@arcgis/core/widgets/Expand')
+    try {
+      const map = this.view.map;
+      if (!map) return;
+
+      // Update basemap
+      if (settings.basemap) {
+        const basemapName = settings.basemap.toLowerCase();
+        
+        try {
+          // Import required basemap modules
+          const [
+            { default: VectorTileLayer },
+            { default: TileLayer },
+            { default: Basemap }
+          ] = await Promise.all([
+            import('@arcgis/core/layers/VectorTileLayer'),
+            import('@arcgis/core/layers/TileLayer'),
+            import('@arcgis/core/Basemap')
+          ]);
+
+          let basemap: __esri.Basemap;
+
+          switch (basemapName) {
+            case 'streets-vector':
+              basemap = new Basemap({
+                baseLayers: [
+                  new VectorTileLayer({
+                    url: "https://basemaps.arcgis.com/arcgis/rest/services/World_Basemap_v2/VectorTileServer"
+                  })
+                ]
+              });
+              break;
+
+            case 'satellite':
+              basemap = new Basemap({
+                baseLayers: [
+                  new TileLayer({
+                    url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer"
+                  })
+                ]
+              });
+              break;
+
+            case 'topo-vector':
+              basemap = new Basemap({
+                baseLayers: [
+                  new VectorTileLayer({
+                    url: "https://basemaps.arcgis.com/arcgis/rest/services/World_Basemap_v2/VectorTileServer"
+                  })
+                ]
+              });
+              break;
+
+            case 'dark-gray-vector':
+              basemap = new Basemap({
+                baseLayers: [
+                  new VectorTileLayer({
+                    url: "https://basemaps.arcgis.com/arcgis/rest/services/Dark_Gray_Canvas_Vector/VectorTileServer"
+                  })
+                ]
+              });
+              break;
+
+            default:
+              // Fallback to streets
+              console.warn(`Unknown basemap: ${settings.basemap}, falling back to streets-vector`);
+              basemap = new Basemap({
+                baseLayers: [
+                  new VectorTileLayer({
+                    url: "https://basemaps.arcgis.com/arcgis/rest/services/World_Basemap_v2/VectorTileServer"
+                  })
+                ]
+              });
+          }
+
+          map.basemap = basemap;
+        } catch (error) {
+          console.error('Error setting basemap:', error);
+        }
+      }
+
+      // Update map view properties
+      if (map.ground) {
+        map.ground.navigationConstraint = {
+          type: settings.terrain3D ? "none" : "stay-above"
+        };
+      }
+
+      // Update label visibility for all layers
+      if (map.layers) {
+        map.layers.forEach((layer: __esri.Layer) => {
+          if ('labelsVisible' in layer) {
+            (layer as any).labelsVisible = settings.showLabels; // Type safety handled by 'labelsVisible' in layer check
+          }
+        });
+      }
+
+    } catch (error) {
+      console.error('Error applying map settings:', error);
+    }
+  }
+
+  /**
+   * Apply UI widget settings
+   */
+  private async applyUISettings(settings: UISettings): Promise<void> {
+    if (!this.view) return;
+
+    // We'll use the existing UI service methods
+    await Promise.all([
+      this.configureMinimapWidget(settings.minimap),
+      this.configureCompassWidget(settings.compass),
+      this.configureCoordinatesWidget(settings.mouseCoordinates),
+      this.configureScalebarWidget(settings.scalebarUnit)
     ]);
 
-    // Create and configure Sketch widget
-    this.sketch = new Sketch({
-      view: this.view,
-      layer: this.graphicsLayer!,
-      availableCreateTools: ['point', 'polyline', 'polygon', 'rectangle', 'circle'],
-      defaultCreateOptions: {
-        mode: 'click' // Use 'freehand' for freehand drawing mode
-      },
-      defaultUpdateOptions: {
-        tool: 'transform',
-        enableRotation: true,
-        enableScaling: true
-      },
-      snappingOptions: {
-        enabled: true
+    // Apply theme
+    const calciteShell = document.querySelector('calcite-shell') as HTMLElement & {
+      setAttribute(name: string, value: string): void;
+      removeAttribute(name: string): void;
+    };
+    if (calciteShell) {
+      if (settings.theme === 'auto') {
+        calciteShell.removeAttribute('theme');
+      } else {
+        calciteShell.setAttribute('theme', settings.theme);
       }
-    });
-
-    // Wrap Sketch in Expand widget with localized tooltip
-    this.sketchExpand = new Expand({
-      view: this.view,
-      content: this.sketch,
-      expandIcon: 'edit',  // Using a standard icon instead of sketch
-      expandTooltip: this.localizationService.getLocalizedLabel('שרטוט', 'Sketch')
-    });
-
-    // Add to UI
-    this.view.ui.add(this.sketchExpand, 'top-right');
-
-    // Set up event listeners
-    this.setupSketchEventListeners();
+    }
   }
 
-  private setupSketchEventListeners(): void {
-    if (!this.sketch) return;
-
-    this.sketch.on('create', (event) => {
-      if (event.state === 'complete') {
-        this.operations++;
-        this.canUndo.set(this.operations > 0);
-        this.canRedo.set(false);
-        console.log('New geometry created:', event.graphic.geometry);
-        // TODO: Persist the geometry to a service
-        // await yourService.saveGeometry(event.graphic.geometry);
-      }
-    });
-
-    this.sketch.on('update', (event) => {
-      if (event.state === 'complete') {
-        this.operations++;
-        this.canUndo.set(this.operations > 0);
-        this.canRedo.set(false);
-      }
-    });
-
-    this.sketch.on('undo', () => {
-      this.operations--;
-      this.canUndo.set(this.operations > 0);
-      this.canRedo.set(true);
-    });
-
-    this.sketch.on('redo', () => {
-      this.operations++;
-      this.canUndo.set(this.operations > 0);
-      this.canRedo.set(this.operations < (this.sketch?.layer.graphics.length ?? 0));
-    });
+  /**
+   * Configure minimap widget
+   */
+  private async configureMinimapWidget(enabled: boolean): Promise<void> {
+    if (!enabled || !this.view) return;
+    const element = document.createElement('arcgis-mini-map') as HTMLElement;
+    (element as any).view = this.view;
+    await this.uiService.addWidget('minimap', element, { position: 'bottom-right' });
   }
 
-  private async recreateSketchWidget(): Promise<void> {
-    if (!this.isBrowser || !this.view) return;
-    
-    // Remove existing widget and its container
-    if (this.sketchExpand) {
-      this.view.ui.remove(this.sketchExpand);
-      this.sketchExpand.destroy();
-      this.sketchExpand = null;
-    }
-    if (this.sketch) {
-      this.sketch.destroy();
-      this.sketch = null;
-    }
+  /**
+   * Configure compass widget
+   */
+  private async configureCompassWidget(enabled: boolean): Promise<void> {
+    if (!enabled || !this.view) return;
+    const element = document.createElement('arcgis-compass') as HTMLElement;
+    (element as any).view = this.view;
+    await this.uiService.addWidget('compass', element, { position: 'top-right' });
+  }
 
-    // Create new widget
-    await this.createSketchWidget();
+  /**
+   * Configure coordinates widget
+   */
+  private async configureCoordinatesWidget(enabled: boolean): Promise<void> {
+    if (!enabled || !this.view) return;
+    const element = document.createElement('arcgis-coordinate-conversion') as HTMLElement;
+    (element as any).view = this.view;
+    await this.uiService.addWidget('coordinates', element, { position: 'bottom-left' });
+  }
+
+  /**
+   * Configure scalebar widget
+   */
+  private async configureScalebarWidget(unit: 'metric' | 'imperial'): Promise<void> {
+    if (!this.view) return;
+    const element = document.createElement('arcgis-scalebar') as HTMLElement;
+    (element as any).view = this.view;
+    (element as any).unit = unit;
+    await this.uiService.addWidget('scalebar', element, { position: 'bottom-left' });
+  }
+
+  private async initializeConfiguredWidgets(): Promise<void> {
+    if (!this.view || !this.config.widgets) return;
+
+    try {
+      // Initialize configured widgets based on config
+      if (this.config.widgets.search?.enabled) {
+        const searchElement = document.createElement('arcgis-search') as ArcGISSearchElement;
+        searchElement.view = this.view;
+        this.view.ui.add(searchElement, this.config.widgets.search.position);
+      }
+
+      if (this.config.widgets.basemapToggle?.enabled) {
+        const basemapToggleElement = document.createElement('arcgis-basemap-toggle') as ArcGISBasemapToggleElement;
+        basemapToggleElement.view = this.view;
+        basemapToggleElement.nextBasemap = this.config.widgets.basemapToggle.nextBasemap ?? 'satellite';
+        this.view.ui.add(basemapToggleElement, this.config.widgets.basemapToggle.position);
+      }
+
+      if (this.config.widgets.layerList?.enabled) {
+        const [{ default: LayerList }, { default: Expand }] = await Promise.all([
+          import('@arcgis/core/widgets/LayerList'),
+          import('@arcgis/core/widgets/Expand')
+        ]);
+
+        const layerList = new LayerList({ view: this.view });
+        const expand = new Expand({
+          view: this.view,
+          content: layerList,
+          expandIcon: 'layers',
+          expanded: this.config.widgets.layerList.expanded
+        });
+        this.view.ui.add(expand, this.config.widgets.layerList.position);
+      }
+    } catch (error) {
+      console.error('Error initializing widgets:', error);
+    }
   }
 
   ngOnDestroy(): void {
     if (!this.isBrowser) return;
 
-    if (this.view) {
-      try {
-        // Remove all UI components first
-        this.view.ui.empty();
-        
-        // Clean up widgets
-        if (this.sketchExpand) {
-          this.sketchExpand.destroy();
-          this.sketchExpand = null;
-        }
-        if (this.sketch) {
-          this.sketch.destroy();
-          this.sketch = null;
-        }
-        
-        // Destroy the view and clean up its resources
-        this.view.container = null;
-        this.view.destroy();
-        this.view = null;
-        
-        // Clean up the map div
-        if (this.mapViewDiv?.nativeElement) {
-          this.mapViewDiv.nativeElement.innerHTML = '';
-        }
+    try {
+      // First, signal all subscriptions to complete
+      this.destroy$.next();
+      this.destroy$.complete();
 
-  // instance tracking removed; nothing to decrement
-      } catch (error) {
-        console.error('Error destroying map view:', error);
+      // Clean up view and services in order
+      if (this.view) {
+        // Clean up services in dependency order
+        this.uiService.destroy();       // UI components first (depends on sketch and layers)
+        this.sketchService.destroy();   // Then sketch tools (depends on layers)
+        this.layerService.destroy();    // Then layers (base level)
+        this.mapStateService.destroy(); // Map state service (independent)
+        
+        // Detach from ArcGIS service last (this will handle final map cleanup)
+        this.arcgisService.detach();
+        this.view = null;
+      }
+      
+      // Clean up the map container
+      if (this.mapViewDiv?.nativeElement) {
+        this.mapViewDiv.nativeElement.innerHTML = '';
+      }
+    } catch (error) {
+      console.error('Error during component cleanup:', error);
+      // Even if there's an error, try to complete the destroy$ subject
+      if (!this.destroy$.closed) {
+        this.destroy$.complete();
       }
     }
   }

@@ -1,0 +1,30 @@
+<div #mapViewDiv class="map-container"></div>
+<div class="sketch-toolbar" [dir]="localizationService.localeDir$ | async">
+  <calcite-button
+    appearance="solid"
+    kind="danger"
+    scale="s"
+    icon-start="trash"
+    [disabled]="!(hasFeatures$ | async)"
+    (click)="clear()">
+    {{ localizationService.getLocalizedLabel('נקה', 'Clear') }}
+  </calcite-button>
+  <calcite-button
+    appearance="solid"
+    kind="neutral"
+    scale="s"
+    icon-start="arrow-left"
+    [disabled]="!(canUndo$ | async)"
+    (click)="undo()">
+    {{ localizationService.getLocalizedLabel('בטל', 'Undo') }}
+  </calcite-button>
+  <calcite-button
+    appearance="solid"
+    kind="neutral"
+    scale="s"
+    icon-start="arrow-right"
+    [disabled]="!(canRedo$ | async)"
+    (click)="redo()">
+    {{ localizationService.getLocalizedLabel('בצע שוב', 'Redo') }}
+  </calcite-button>
+</div>

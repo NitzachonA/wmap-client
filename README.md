@@ -6,11 +6,40 @@ This is a production-ready Angular 20 application that displays an Esri web map 
 
 - Angular 20 with standalone components
 - ArcGIS Maps SDK integration using @arcgis/core (ESM)
-- Full-screen map with responsive layout
-- Sample feature layer with popup template
-- Built-in widgets: Search, BasemapToggle, and LayerList
-- Proper cleanup on component destruction
+- Clean, service-based architecture for scalable development
+- Dynamic layer management via LayerService
+- Interactive drawing tools with SketchService
+- Programmatic segment creation
+- Configurable map setup via dependency injection
 - RTL support ready
+- Comprehensive testing suite
+
+## Architecture
+
+The application follows a modular, service-based architecture:
+
+### Core Services
+
+- `ArcGISInitService`: Central source of truth for Map and MapView lifecycle
+- `LayerService`: Manages layer addition/removal and layer state
+- `SketchService`: Handles drawing operations with vertex control
+- `MapStateService`: Manages map state and navigation
+- `UIService`: Handles UI components and widgets
+- `SegmentService`: Manages programmatic segment creation
+
+### Key Components
+
+- `MapPageComponent`: Main map container with view initialization
+- `PointsToolComponent`: Example tool for point placement
+- `LayersToggleComponent`: Example for layer management
+
+### Features
+
+- RxJS-based state management
+- Promise-based drawing operations
+- Type-safe configurations via DI tokens
+- Proper cleanup and resource management
+- Comprehensive test coverage
 
 ## Prerequisites
 
